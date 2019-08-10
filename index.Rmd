@@ -1,0 +1,289 @@
+---
+title: "Predicting the Manner in which an Exercise is being done"
+author: "Darrel Schwarz"
+date: "7<sup>th</sup> August 2019"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: 
+
+- exactly according to the specification (Class A)
+
+- throwing the elbows to the front (Class B)
+
+- lifting the dumbbell only halfway (Class C)
+
+- lowering the dumbbell only halfway (Class D) 
+
+- throwing the hips to the front (Class E)
+
+More information is available from the website here: [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf) (see the section on the Weight Lifting Exercise Data set).
+
+
+## Methodology
+The goal of this report is to build a model to predict the manner in which they did the exercise. 
+
+1/ Identify and clean the columns in the data to be used for the model creation (remove anything we don't want).
+
+2/ Split the training data into a Training (70%) and Test Training (30%) data sets.
+
+3/ Generate multiple Random Forrest models to find the best model.(Note: project documentation mentions we need an accuracy of >99%).
+
+4/ Use the chosen model to predict on the Test Training data set.
+
+5/ Use the chosen model to predict on the Test data and report results.
+
+## Environment
+
+\footnotesize
+```{r environment, results="hide"}
+#Environment setup
+plat <- sessionInfo()["platform"]
+osv <- sessionInfo()["running"]
+rv <- R.version$version.string
+
+suppressMessages(library(knitr))
+knitrv <- packageVersion("knitr")
+
+suppressMessages(library(here))
+herev <- packageVersion("here")
+
+suppressMessages(library(caret))
+caretv <- packageVersion("caret")
+
+suppressMessages(library(parallel))
+parallelv <- packageVersion("parallel")
+
+suppressMessages(library(doParallel))
+doparallelv <- packageVersion("doParallel")
+
+setwd(here())   
+```
+\normalsize
+
+The analysis was performed with the following OS & R library versions.
+
+Platform `r plat`
+
+Operating System `r osv`
+
+`r rv`
+
+knitr version `r knitrv`
+
+here version `r herev`
+
+caret version `r caretv`
+
+parallel version `r parallelv`
+
+doParallel version `r doparallelv`
+
+
+## Data Preparation
+
+### Data load
+\footnotesize
+```{r getTrainingData}
+filename <- "pml-training.csv"
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+if(!file.exists(filename)) {
+        download.file(fileUrl,destfile=filename)
+}
+
+training <- read.csv(filename, header=TRUE, sep=",") 
+```
+\normalsize
+
+### Exploratory Data Analysis and Clean Up
+```{r}
+str(training) 
+```
+
+Looking at the data there is some information that isn't related to the exercises being done and a lot of NA's.
+
+#### Identity and Time Data
+
+We don't want to predict what a specific user is doing so lets remove any identifying data.
+
+Also, we don't want to train the model on specific times so lets remove any time data.
+
+
+\footnotesize
+```{r}
+# Exclude non-relevant data
+ex1 <- names(training)[grep("^X|user|timestamp|window", names(training))]
+ex1
+```
+\normalsize
+
+#### Derived Data
+
+According to section **5.1 : Feature extraction and selection** in the documentation [Qualitative Activity Recognition of Weight Lifting Exercises](http://web.archive.org/web/20170519033209/http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf) there are multiple variables that were derived and added to the dataset.
+
+**5.1 Feature extraction and selection**     
+
+> *For feature extraction we used a sliding window approach with different lengths from 0.5 second to 2.5 seconds, with 0.5 second overlap. In each step of the sliding window approach we calculated features on the Euler angles (roll, pitch and yaw), as well as the raw accelerometer, gyroscope and magnetometer readings. For the Euler angles of each of the four sensors we calculated eight features: mean, variance, standard deviation, max, min, amplitude, kurtosis and skewness, generating in total 96 derived feature sets.*
+
+As these columns have been derived from the raw sensor data they should be removed so as not to cause confusion in the model creation.
+
+```{r results="asis"}
+ex2<- names(training)[grep("^(avg|var|stddev|max|min|amplitude|kurtosis|skewness)_", names(training))]
+
+t <- as.data.frame(matrix(ex2,ncol=4))
+names(t) <- rep("Column Name",4)
+
+kable(t, caption="**Derived columns to be excluded**")
+```
+
+#### Remove the Selected columns from training data
+\footnotesize
+```{r}
+# Remove selected columns from the training data
+exc <- c(ex1,ex2)
+training <- training[!names(training) %in% exc]
+
+str(training)
+```
+\normalsize
+
+This has dropped the columns from 160 to 53 and as a bonus removed a lot of the NA's.
+
+### Creating Training and Testing data sets
+
+\footnotesize
+```{r}
+#now split into a train and test set
+set.seed(1234)
+inTrain <- createDataPartition(training$classe,p=0.7, list=FALSE)
+traindata <- training[inTrain,]
+testdata  <- training[-inTrain,]
+```
+\normalsize
+
+The Training data was split 70/30 with
+
+- Training dataset having `r dim(traindata)[1]` records.
+
+- Test Training dataset having `r dim(testdata)[1]` records.
+
+## Model Analysis
+Using the information in [Improving Performance of Random Forest in caret::train()](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md),
+
+"Random Forrest" was selected as the method, due to it being one of the top performing algorithms, using   
+
+- 5 - fold Cross validation used to help reduce over fitting
+
+- parallel processing was enabled to speed up the processing
+
+Then started model generation with ntree set to 10 and increased by 10 while the accuracy continued to increase until a result of over 99% accuracy was achieved (project notes suggested >99% needed). There is a risk that this could cause over fitting but using cross validation will help reduce this risk.
+
+\footnotesize
+```{r mdlTrain,cache=TRUE}
+#
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+modelrf10 <- train(classe~.,traindata, method="rf",
+                 trControl=trainControl(method="cv", 5, allowParallel = TRUE),
+                 ntree=10) 
+
+modelrf20 <- train(classe~.,traindata, method="rf",
+                 trControl=trainControl(method="cv", 5, allowParallel = TRUE),
+                 ntree=20) 
+
+modelrf30 <- train(classe~.,traindata, method="rf",
+                 trControl=trainControl(method="cv", 5, allowParallel = TRUE),
+                 ntree=30) 
+
+modelrf40 <- train(classe~.,traindata, method="rf",
+                 trControl=trainControl(method="cv", 5, allowParallel = TRUE),
+                 ntree=40) 
+
+modelrf50 <- train(classe~.,traindata, method="rf",
+                 trControl=trainControl(method="cv", 5, allowParallel = TRUE),
+                 ntree=50) 
+
+modelrf60 <- train(classe~.,traindata, method="rf",
+                 trControl=trainControl(method="cv", 5, allowParallel = TRUE),
+                 ntree=60) 
+
+modelrf100 <- train(classe~.,traindata, method="rf",
+                 trControl=trainControl(method="cv", 5, allowParallel = TRUE),
+                 ntree=100) 
+
+stopCluster(cluster)
+registerDoSEQ()
+```
+\normalsize
+
+Accuracy was used to select the optimal model using the largest value with of mtry=27 giving the best for each model.
+
+\footnotesize
+```{r results="asis"}
+mdlres <- rbind(modelrf10$results[2,],modelrf20$results[2,],modelrf30$results[2,],
+                modelrf40$results[2,],modelrf50$results[2,],modelrf60$results[2,],
+                modelrf100$results[2,])
+rownames(mdlres) <- c(c("Mdl-10","Mdl-20","Mdl-30","Mdl-40","Mdl-50","Mdl-60","Mdl100"))
+kable(mdlres, caption="**Model Accuracy for different ntree values**")
+
+```
+\normalsize
+
+The optimum setting of ntree seems to be around 50 which gives an accuracy of `r round(mdlres[5,2]*100,2)`%.  
+
+\footnotesize
+```{r}
+modelrf50
+confusionMatrix.train(modelrf50)
+```
+\normalsize
+
+## Prediction on Test Training Data
+\footnotesize
+```{r mdltest}
+#
+testresult50 <- predict(modelrf50, testdata)
+trcm50 <- confusionMatrix(testdata$classe,testresult50)
+trcm50
+```
+\normalsize
+
+For chosen model the in sample error rate was `r 100-round(mdlres[5,2]*100,2)`% and the out of sample error rate was `r 100-round(trcm50$overall[[1]]*100,2)`%.  
+
+As the out of sample error rate is less than the in sample error rate there is the possibility that the model has been over fitted.
+
+## Prediction on Test Data
+\footnotesize
+```{r}
+filename <- "pml-testing.csv"
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if(!file.exists(filename)) {
+        download.file(fileUrl,destfile=filename)
+}
+
+testing <- read.csv(filename, header=TRUE, sep=",")
+
+# Drop the columns we didn't use in the model creation
+testing <- testing[!names(testing) %in% exc]
+```
+\normalsize
+
+Prediction Results for Random Forrest method with ntree set to 50 and cross validation to 5 are:
+
+\footnotesize
+```{r}
+predict(modelrf50, testing)
+```
+\normalsize
+
+## References - Data Source
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/work.jsf?p1=11201). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
